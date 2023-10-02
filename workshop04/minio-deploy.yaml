@@ -1,0 +1,150 @@
+# STATEFULSET
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio-sts
+  namespace: minions
+  labels:
+    app: minio-po
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: minio-po
+  serviceName: minio-hsvc
+  volumeClaimTemplates:
+  - metadata:
+      name: minio-pv
+    spec:
+      accessModes: [ ReadWriteOnce ]
+      storageClassName: do-block-storage 
+      resources:
+        requests:
+          storage: 1Gi
+  template:
+    metadata:
+      name: minio-po
+      labels:
+        app: minio-po
+    spec:
+      initContainers:
+      - name: change-perms
+        image: busybox
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -c
+        - "chmod 777 /data"
+        volumeMounts:
+        - name: minio-pv
+          mountPath: /data
+      containers:
+      - name: minio-container
+        image: bitnami/minio:2023.9.23
+        imagePullPolicy: IfNotPresent
+        command:
+        - minio
+        - server
+        - --address=:9000
+        - --console-address=:9090
+        - http://minio-sts-{0...2}.minio-hsvc.minions.svc.cluster.local/data
+        # ENV VARS
+        envFrom:
+        - secretRef:
+            name: minio-secret
+        volumeMounts:
+        - name: minio-pv
+          mountPath: /data
+        # HEALTH CHECK
+        livenessProbe:
+          httpGet:
+            path: /minio/live/health
+            port: 9000
+          initialDelaySeconds: 5
+          periodSeconds: 60
+        readinessProbe:
+          httpGet:
+            path: /minio/ready/health
+            port: 9000
+          initialDelaySeconds: 5
+          periodSeconds: 60
+
+# HEADLESS SERVICE
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-hsvc
+  namespace: minions
+  labels:
+    app: minio-po
+spec:
+  clusterIP: None
+  selector:
+    app: minio-po
+  ports:
+    - name: main
+      protocol: TCP
+      port: 8000
+      targetPort: 9000
+    - name: console
+      protocol: TCP
+      port: 8080
+      targetPort: 9090
+
+# SERVICE
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-svc
+  namespace: minions
+  labels:
+    app: minio-po
+spec:
+  type: ClusterIP
+  selector:
+    app: minio-po
+  ports:
+    - name: main
+      protocol: TCP
+      port: 8000
+      targetPort: 9000
+    - name: console
+      protocol: TCP
+      port: 8080
+      targetPort: 9090
+
+# INGRESS
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: minio-ing
+  namespace: minions
+  labels:
+    app: minio-po
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: minio.minions.k8s.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: minio-svc
+            port:
+              number: 8000
+  - host: console.minio.minions.k8s.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: minio-svc
+            port:
+              number: 8080
